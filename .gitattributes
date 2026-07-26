@@ -1,0 +1,2 @@
+# Normalize all text files to LF so the repo behaves identically on Windows and WSL/Linux
+* text=auto eol=lf

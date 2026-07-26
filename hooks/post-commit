@@ -1,0 +1,42 @@
+#!/bin/sh
+# worklog 全局 git 钩子:非 merge commit 即捕获为 done 事件(AC-1)。任何失败静默,绝不阻塞 git。
+WL_HOME="${WL_HOME:-$HOME/.worklog}"
+
+# 防递归:链式回调的本地钩子如再触发 git 操作,不会二次进入
+[ -n "${WL_POST_COMMIT_RUNNING:-}" ] && exit 0
+WL_POST_COMMIT_RUNNING=1
+export WL_POST_COMMIT_RUNNING
+
+# core.hooksPath 全局生效会遮蔽仓库本地钩子(husky 等),必须链式回调。
+# 注意:必须用 --git-dir 拼路径。--git-path hooks/post-commit 会解析回 core.hooksPath
+# 指向的全局目录,即本脚本自身,造成自调用。
+git_dir="$(git rev-parse --git-dir 2>/dev/null)" || exit 0
+local_hook="$git_dir/hooks/post-commit"
+if [ -x "$local_hook" ]; then
+  "$local_hook" "$@" || true
+fi
+
+# per-repo 关闭开关:git config worklog.capture false
+[ "$(git config --get worklog.capture 2>/dev/null)" = "false" ] && exit 0
+
+# merge commit 跳过(父提交数 > 1 → 行 token 数 > 2)
+parents="$(git rev-list --parents -n1 HEAD 2>/dev/null | wc -w | tr -d ' ')"
+[ -n "$parents" ] && [ "$parents" -gt 2 ] && exit 0
+
+sha="$(git rev-parse --short HEAD 2>/dev/null)" || exit 0
+subject="$(git log -1 --format=%s 2>/dev/null)" || exit 0
+top="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+repo="$(basename "$top")"
+
+# 登记仓库路径,供 gitlog 采集器使用(去重追加)
+if ! grep -qxF "$top" "$WL_HOME/state/repos.list" 2>/dev/null; then
+  mkdir -p "$WL_HOME/state" 2>/dev/null || true
+  printf '%s\n' "$top" >>"$WL_HOME/state/repos.list" 2>/dev/null || true
+fi
+
+wl_bin="$WL_HOME/bin/wl"
+if [ ! -x "$wl_bin" ]; then
+  wl_bin="$(command -v wl 2>/dev/null)" || exit 0
+fi
+"$wl_bin" done --project "$repo" --source "commit:$sha" -- "$subject" >/dev/null 2>&1 || true
+exit 0

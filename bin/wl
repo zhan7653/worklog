@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# worklog 热路径入口:捕获毫秒级、零重依赖。冷路径子命令整体转发给 Node。
+set -euo pipefail
+
+WL_HOME="${WL_HOME:-$HOME/.worklog}"
+INBOX="$WL_HOME/inbox.jsonl"
+
+# 解析自身真实位置(可能经 ~/.local/bin/wl 软链调用;macOS 无 readlink -f,用循环)
+src="${BASH_SOURCE[0]}"
+while [ -h "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  case "$src" in /*) ;; *) src="$dir/$src" ;; esac
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$src")" && pwd)"
+
+resolve_cold() {
+  local candidate
+  for candidate in "$SCRIPT_DIR/../scripts/worklog/bin/worklog.js" "$WL_HOME/scripts/worklog/bin/worklog.js"; do
+    if [ -f "$candidate" ]; then printf '%s' "$candidate"; return 0; fi
+  done
+  return 1
+}
+
+resolve_remind() {
+  local candidate
+  for candidate in "$SCRIPT_DIR/../hooks/remind.sh" "$WL_HOME/hooks/remind.sh"; do
+    if [ -x "$candidate" ]; then printf '%s' "$candidate"; return 0; fi
+  done
+  return 1
+}
+
+iso_now() { # macOS BSD date 无 -Is;统一手工拼并补冒号
+  date +%Y-%m-%dT%H:%M:%S%z | sed 's/\([0-9][0-9]\)$/:\1/'
+}
+
+json_line() { # $1=ts $2=type $3=text $4=project $5=source;转义只走 jq/python3,禁止手拼
+  if command -v jq >/dev/null 2>&1; then
+    jq -cn --arg ts "$1" --arg type "$2" --arg text "$3" --arg project "$4" --arg source "$5" \
+      '{ts:$ts,type:$type,text:$text,project:$project,source:$source}'
+  else
+    WL_TS="$1" WL_TYPE="$2" WL_TEXT="$3" WL_PROJECT="$4" WL_SOURCE="$5" python3 -c '
+import json, os
+keys = ("ts", "type", "text", "project", "source")
+print(json.dumps({k: os.environ["WL_" + k.upper()] for k in keys}, ensure_ascii=False, separators=(",", ":")))'
+  fi
+}
+
+redact() {
+  printf '%s' "$1" | sed -E \
+    -e 's/\b(sk|pk|rk)-[A-Za-z0-9_-]{8,}/[REDACTED]/g' \
+    -e 's/\bgithub_pat_[A-Za-z0-9_]{20,}/[REDACTED]/g' \
+    -e 's/\bgh[pousr]_[A-Za-z0-9]{20,}/[REDACTED]/g' \
+    -e 's/\bAKIA[0-9A-Z]{16}\b/[REDACTED]/g' \
+    -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._-]{16,}/\1[REDACTED]/g' \
+    -e 's/[[:alnum:]._+-]+@[[:alnum:]-]+\.[[:alnum:].-]+/[REDACTED]/g'
+}
+
+capture() {
+  local type="$1"; shift
+  local project="" source="manual" text="" do_redact=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project) project="$2"; shift 2 ;;
+      --source)  source="$2";  shift 2 ;;
+      --redact)  do_redact=1;  shift ;;
+      --)        shift; text="$*"; break ;;
+      *)         text="$*"; break ;;
+    esac
+  done
+  if [ -z "$text" ]; then
+    echo "wl: text required" >&2
+    exit 2
+  fi
+  if [ -z "$project" ] && git rev-parse --show-toplevel >/dev/null 2>&1; then
+    project="$(basename "$(git rev-parse --show-toplevel)")"
+  fi
+  if [ "$do_redact" -eq 1 ]; then
+    text="$(redact "$text")"
+  fi
+  mkdir -p "$WL_HOME"
+  local line
+  line="$(json_line "$(iso_now)" "$type" "$text" "$project" "$source")"
+  if command -v flock >/dev/null 2>&1; then
+    { flock 9; printf '%s\n' "$line" >&9; } 9>>"$INBOX"
+  else
+    printf '%s\n' "$line" >>"$INBOX" # macOS 无 flock:依赖 O_APPEND 单行近似原子
+  fi
+}
+
+usage() {
+  cat <<'EOF'
+usage: wl done|todo|idea|note [--project P] [--source S] [--redact] [--] TEXT
+       wl status
+       wl remind [--human]
+       wl assemble|confirm|commit|render|rebuild|import-v1 [args...]
+EOF
+}
+
+case "${1:-help}" in
+  done|todo|idea|note)
+    t="$1"; shift
+    capture "$t" "$@"
+    ;;
+  status)
+    r="$(resolve_remind)" || { echo "wl: remind.sh not found" >&2; exit 1; }
+    exec "$r" --human
+    ;;
+  remind)
+    shift
+    r="$(resolve_remind)" || exit 0
+    exec "$r" "$@"
+    ;;
+  assemble|confirm|commit|render|rebuild|import-v1)
+    cold="$(resolve_cold)" || { echo "wl: cold path worklog.js not found (run install.sh first?)" >&2; exit 1; }
+    exec node "$cold" "$@"
+    ;;
+  help|--help|-h)
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

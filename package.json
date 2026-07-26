@@ -1,0 +1,15 @@
+{
+  "name": "worklog",
+  "version": "0.1.0",
+  "description": "Event-capture personal daily report system: capture at the moment, archaeology as fallback.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "check": "node --check scripts/worklog/bin/worklog.js && node --check scripts/worklog/lib/*.js && node --check scripts/worklog/lib/collectors/*.js",
+    "test": "node --test tests/coldpath/"
+  },
+  "license": "MIT"
+}
