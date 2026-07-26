@@ -55,8 +55,8 @@ description: Settle the user's daily worklog through a confirmation-driven dialo
 
 - **day.json 与 report.\* 是生成物,禁止直接编辑**;唯一可编辑物是 confirmation,且只经 `wl confirm` 校验落盘,不徒手写 `days/D/confirmation.json`。
 - **未经用户明确点头不执行 `wl commit`**。复述摘要后用户改口,就重新 confirm 再复述。
-- **零成本退出**:用户说「待会儿」或不回应 → 什么都不写,立即结束话题;「跳过今天」→ 提交 `{"date":"D","skipDay":true}` 的 confirmation 并 commit,此后不再提。两种情况都不追问。
-- **多日欠账逐日最小摘要,禁止长审讯**:三天欠账不许变成三轮审问,每日一屏、一次点头。
+- **零成本退出**:用户说「待会儿」或不回应 → 什么都不写,立即结束话题;「跳过今天」→ 直接 `wl confirm --date D --patch -` 提交 `{"date":"D","skipDay":true}` 再 `wl commit --date D`(**无需先 assemble**,skipDay 不依赖 day.json),此后不再提。两种情况都不追问。
+- **多日欠账逐日最小摘要,禁止长审讯**:三天欠账不许变成三轮审问,每日一屏、一次点头。**从最早的欠账日开始逐日结算**——提交器会拒绝把有数据的更早欠账日静默吞进 confirmedThrough,乱序提交会显式报错。
 - **不主动生成当日报告**,除非用户处于收工模式。
 - **无罪恶感文案**(FR-13):任何逃生门的使用不得引来负面反馈,绝不出现「你已连续 N 天未记录」类话术。
 - **提醒纪律以注入体为准**:hook 注入的那一行自带交互约束,遵守它即可,不把提醒纪律复述或扩写到别处。

@@ -127,7 +127,7 @@ function composeDayView({ date, snapshot, day, confirmation, log = [] }) {
         project: String(event?.project ?? ''),
         source: String(event?.source ?? ''),
       }))
-    salvageCount = dayTxs.reduce((sum, tx) => sum + listOf(tx.confirmation.acceptCandidates).length, 0)
+    salvageCount = new Set(dayTxs.flatMap(tx => listOf(tx.confirmation.acceptCandidates))).size
     completions = dayTxs.flatMap(tx => listOf(tx.confirmation.completeTodos)).filter(item => item && item.todoId)
   } else {
     const firsthand = listOf(day?.firsthand).map(withEdit)
@@ -135,6 +135,14 @@ function composeDayView({ date, snapshot, day, confirmation, log = [] }) {
     events = [...firsthand, ...salvaged]
     salvageCount = salvaged.length
     completions = listOf(conf.completeTodos).filter(item => item && item.todoId)
+  }
+
+  // skipped 日(仅有 skip 事务):不把未入账的草稿事件渲染成"完成",报告保持空(AC-13 语义)
+  const suppressDraftPreview = status === 'skipped' && !ledgerMode
+  if (suppressDraftPreview) {
+    events = []
+    salvageCount = 0
+    completions = []
   }
 
   const manualEntries = items =>
@@ -147,9 +155,10 @@ function composeDayView({ date, snapshot, day, confirmation, log = [] }) {
       .filter(item => item.text)
 
   // 入账日的 addTodos/addIdeas 已被 resolve 物化进 resolvedEvents,再叠加会重复计数
+  const includeManual = !ledgerMode && !suppressDraftPreview
   const done = events.filter(event => event.type === 'done')
-  const newTodos = [...events.filter(event => event.type === 'todo'), ...(ledgerMode ? [] : manualEntries(conf.addTodos))]
-  const ideas = [...events.filter(event => event.type === 'idea'), ...(ledgerMode ? [] : manualEntries(conf.addIdeas))]
+  const newTodos = [...events.filter(event => event.type === 'todo'), ...(includeManual ? manualEntries(conf.addTodos) : [])]
+  const ideas = [...events.filter(event => event.type === 'idea'), ...(includeManual ? manualEntries(conf.addIdeas) : [])]
 
   const openTodos = day
     ? listOf(day?.openTodosSnapshot).map(item => ({
@@ -199,8 +208,13 @@ function composeDayView({ date, snapshot, day, confirmation, log = [] }) {
   const records = [...done, ...newTodos, ...ideas]
   const projectCount = new Set(records.map(record => record.project).filter(Boolean)).size
   const recordCount = records.length
-  const overviewText =
-    String(day?.overview?.text ?? '').trim() || `共 ${recordCount} 条记录覆盖 ${projectCount} 个项目。`
+  // 入账日的模板概览按入账终态重算(day.json 里的计数在确认/补充后已过期);
+  // LLM 概览与草稿日概览沿用 day.json
+  const recomputed = `共 ${recordCount} 条记录覆盖 ${projectCount} 个项目。`
+  const dayOverviewText = String(day?.overview?.text ?? '').trim()
+  const overviewText = ledgerMode
+    ? (day?.overview?.by === 'llm' && dayOverviewText) || recomputed
+    : dayOverviewText || recomputed
 
   return {
     date,
@@ -216,6 +230,7 @@ function composeDayView({ date, snapshot, day, confirmation, log = [] }) {
     recordCount,
     inboxLines: Number(day?.scan?.inboxLines) || 0,
     salvageCount,
+    hasDayJson: Boolean(day),
   }
 }
 
@@ -257,7 +272,9 @@ function sourceMarker(source) {
 function entryText(entry, { markers = true } = {}) {
   const parts = []
   if (entry.project) parts.push(`[${entry.project}]`)
-  parts.push(entry.text)
+  // 折叠条目内换行:多行捕获文本不得把自己的行首变成 markdown 标题/列表,
+  // 否则普通输入就能注入 FR-11 明令不设的区块
+  parts.push(String(entry.text ?? '').replace(/[\r\n]+\s*/g, ' '))
   const marker = markers ? sourceMarker(entry.source) : ''
   if (marker) parts.push(marker)
   return parts.join(' ')
@@ -300,7 +317,8 @@ function renderDayMarkdown(view) {
   lines.push('')
   appendBullets(lines, view.ideas)
   lines.push('---')
-  lines.push(`inbox ${view.inboxLines} 条 · 捞漏确认 ${view.salvageCount} 条 · [day.json](./day.json)`)
+  const footer = `inbox ${view.inboxLines} 条 · 捞漏确认 ${view.salvageCount} 条`
+  lines.push(view.hasDayJson ? `${footer} · [day.json](./day.json)` : footer)
   return `${lines.join('\n')}\n`
 }
 

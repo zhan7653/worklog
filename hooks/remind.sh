@@ -4,21 +4,31 @@ WL_HOME="${WL_HOME:-$HOME/.worklog}"
 LEDGER="$WL_HOME/ledger/ledger.json"
 INBOX="$WL_HOME/inbox.jsonl"
 today="$(date +%F)"
+notified="$WL_HOME/state/notified-$today"
+
+# 每本地日至多注入一次,跨 SessionStart 与 UserPromptSubmit 两条挂点共享(AC-4/NFR 频率上限);
+# --human(wl status)不受限
+if [ "${1:-}" != "--human" ] && [ -e "$notified" ]; then
+  exit 0
+fi
 
 confirmed=""
 if [ -f "$LEDGER" ]; then
   if command -v jq >/dev/null 2>&1; then
     confirmed="$(jq -r '.confirmedThrough // empty' "$LEDGER" 2>/dev/null)" || confirmed=""
-  elif command -v python3 >/dev/null 2>&1; then
-    confirmed="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("confirmedThrough",""))' "$LEDGER" 2>/dev/null)" || confirmed=""
+  else
+    # AC-14:提醒链路不启动重语言;jq 缺席时用 sed 提取(快照为本系统自写,形状稳定)
+    confirmed="$(sed -n 's/.*"confirmedThrough"[[:space:]]*:[[:space:]]*"\([0-9][0-9-]*\)".*/\1/p' "$LEDGER" 2>/dev/null | head -1)" || confirmed=""
   fi
 fi
 [ -n "$confirmed" ] || confirmed="1970-01-01"
 
 # 有数据的日期 = inbox 各行 ts 的日期部分(升序去重),取 (confirmed, today) 开区间。
 # 行首契约:{"ts":"YYYY-MM-DD…" → 日期恰在第 8-17 字符(FR-2 固定键序;测试锁定该假设)。
-days="$(cut -c8-17 "$INBOX" 2>/dev/null | sort -u \
-        | awk -v a="$confirmed" -v b="$today" '$0 > a && $0 < b')" || days=""
+# 双重防线:行前缀过滤挡住任意垃圾行,日期形状正则挡住截断残行——崩溃残迹不产生假注入。
+days="$(grep '^{"ts":"' "$INBOX" 2>/dev/null | cut -c8-17 | sort -u \
+        | awk -v a="$confirmed" -v b="$today" \
+            '$0 ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/ && $0 > a && $0 < b')" || days=""
 if [ -z "$days" ]; then
   # hook 模式零输出零注入(AC-2);--human 给人一句确认
   [ "${1:-}" = "--human" ] && printf 'worklog:无未确认欠账\n'
@@ -35,5 +45,8 @@ if [ "${1:-}" = "--human" ]; then
   printf 'worklog:%s 未确认,最近一日 %s 条\n' "$span" "$count"
   exit 0
 fi
+# 注入前原子占位当日标记;占位失败(并发已注入/不可写)即静默退出
+mkdir -p "$WL_HOME/state" 2>/dev/null || exit 0
+( set -C; true >"$notified" ) 2>/dev/null || exit 0
 # 注入体自带交互纪律,纪律不进全局 AGENTS.md(设计规格 FR-10)
 printf '[worklog] %s 有未确认记录(最近一日 %s 条)。仅在答完用户当前请求后用一句话附带提及;用户未回应则今日不再提。与当前任务无关时勿展开。\n' "$span" "$count"

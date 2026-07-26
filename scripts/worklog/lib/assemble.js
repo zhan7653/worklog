@@ -13,6 +13,7 @@ import {
   normalizeText,
   readJson,
   readJsonl,
+  redactText,
   unique,
 } from './util.js'
 import { collectCodex } from './collectors/codex.js'
@@ -50,16 +51,28 @@ export async function assembleDay({ wlHome, date, timezone, lookbackDays, useLlm
   }
   firsthandAll.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0))
 
+  // rebase/amend 重复:钩子对同一主题以不同 sha 傻写多行,装配器按(项目+归一化文本)对
+  // commit 来源的一手记录去重(设计规格 FR-3);手记/会话来源不受影响
+  const seenCommitKeys = new Set()
+  const firsthandDeduped = []
+  for (const event of firsthandAll) {
+    if (String(event.source).startsWith('commit:')) {
+      const key = `${event.project}::${normalizeText(event.text)}`
+      if (seenCommitKeys.has(key)) continue
+      seenCommitKeys.add(key)
+    }
+    firsthandDeduped.push(event)
+  }
+
   const snapshot = await readJson(paths.ledgerSnapshot, null)
   const openTodosSnapshot = buildOpenTodosSnapshot(snapshot, date)
 
-  const supplement = await detectSupplement({ paths, snapshot, date })
+  // 补充检测直接以 ledger-log 为准(快照可能落后于 log——崩溃窗口下不误判为全新草稿);
+  // 过滤按「事件 id 是否已入账」而非时间窗,assemble→commit 之间落盘的事件不会被漏掉
+  const supplement = await detectSupplement({ paths, date })
   const firsthand = supplement
-    ? firsthandAll.filter(event => {
-        const tsMs = Date.parse(event.ts)
-        return Number.isFinite(tsMs) && tsMs > supplement.lastAppliedAtMs
-      })
-    : firsthandAll
+    ? firsthandDeduped.filter(event => !supplement.enteredEventIds.has(event.id))
+    : firsthandDeduped
 
   const codexResult = await runCollector(() =>
     collectCodex({ date, codexHome: resolveCodexHome(), timezone: tz, lookbackDays: lookback }),
@@ -140,12 +153,13 @@ export async function confirmDay({ wlHome, date, patch } = {}) {
   const home = resolveWlHome(wlHome)
   const paths = wlPaths(home)
 
-  const day = await readJson(paths.dayJson(date), null)
-  if (!day) {
-    throw new Error(`day.json for ${date} is missing or invalid. Run \`wl assemble --date ${date}\` first.`)
-  }
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
     throw new Error('Invalid patch: expected a JSON object.')
+  }
+  const day = await readJson(paths.dayJson(date), null)
+  // 跳过日零成本(FR-8/AC-13):skipDay:true 不要求先 assemble
+  if (!day && patch.skipDay !== true) {
+    throw new Error(`day.json for ${date} is missing or invalid. Run \`wl assemble --date ${date}\` first.`)
   }
 
   const unknownFields = Object.keys(patch).filter(key => !PATCH_FIELDS.includes(key))
@@ -161,8 +175,8 @@ export async function confirmDay({ wlHome, date, patch } = {}) {
     throw new Error('Invalid patch field skipDay: expected a boolean.')
   }
 
-  const acceptCandidates = stringArrayField(patch.acceptCandidates, 'acceptCandidates')
-  const rejectCandidates = stringArrayField(patch.rejectCandidates, 'rejectCandidates')
+  const acceptCandidates = unique(stringArrayField(patch.acceptCandidates, 'acceptCandidates'))
+  const rejectCandidates = unique(stringArrayField(patch.rejectCandidates, 'rejectCandidates'))
   const editText = objectArrayField(patch.editText, 'editText', { required: ['id', 'text'], optional: [] })
   const completeTodos = objectArrayField(patch.completeTodos, 'completeTodos', {
     required: ['todoId'],
@@ -171,10 +185,10 @@ export async function confirmDay({ wlHome, date, patch } = {}) {
   const addTodos = objectArrayField(patch.addTodos, 'addTodos', { required: ['text'], optional: ['project'] })
   const addIdeas = objectArrayField(patch.addIdeas, 'addIdeas', { required: ['text'], optional: [] })
 
-  const candidateIds = new Set((Array.isArray(day.candidates) ? day.candidates : []).map(item => item.id))
-  const firsthandIds = new Set((Array.isArray(day.firsthand) ? day.firsthand : []).map(item => item.id))
+  const candidateIds = new Set((Array.isArray(day?.candidates) ? day.candidates : []).map(item => item.id))
+  const firsthandIds = new Set((Array.isArray(day?.firsthand) ? day.firsthand : []).map(item => item.id))
   const todoIds = new Set(
-    (Array.isArray(day.openTodosSnapshot) ? day.openTodosSnapshot : []).map(item => item.id),
+    (Array.isArray(day?.openTodosSnapshot) ? day.openTodosSnapshot : []).map(item => item.id),
   )
 
   const unknownIds = []
@@ -194,6 +208,15 @@ export async function confirmDay({ wlHome, date, patch } = {}) {
   const doubleDecided = acceptCandidates.filter(id => rejectCandidates.includes(id))
   if (doubleDecided.length) {
     throw new Error(`Candidate ids listed in both acceptCandidates and rejectCandidates: ${unique(doubleDecided).join(', ')}.`)
+  }
+
+  // skipDay 与其他补丁字段互斥:skip 事务不入账任何事件,静默丢弃比拒绝更糟
+  if (
+    patch.skipDay === true &&
+    (acceptCandidates.length || rejectCandidates.length || editText.length ||
+      completeTodos.length || addTodos.length || addIdeas.length)
+  ) {
+    throw new Error('skipDay:true cannot be combined with other patch fields; settle the day instead.')
   }
 
   const confirmation = {
@@ -238,14 +261,20 @@ async function runCollector(collect) {
 
 function dedupeCandidates({ rawCandidates, firsthandAll, knownCommitSources, decidedCandidateIds }) {
   const inboxCommitShas = new Set()
-  for (const source of knownCommitSources) inboxCommitShas.add(source.slice('commit:'.length))
-  const firsthandTexts = new Set(firsthandAll.map(event => normalizeText(event.text)))
+  for (const source of knownCommitSources) inboxCommitShas.add(source.slice('commit:'.length).toLowerCase())
+  // 候选文本在采集器出口已脱敏,一手文本保持原文——比对时对一手同样脱敏,
+  // 避免同一件事因 [REDACTED] 差异重新以候选身份要求点头
+  const firsthandTexts = new Set()
+  for (const event of firsthandAll) {
+    firsthandTexts.add(normalizeText(event.text))
+    firsthandTexts.add(normalizeText(redactText(event.text)))
+  }
   const seenTexts = new Set()
   const candidates = []
   for (const candidate of rawCandidates) {
     if (!candidate || typeof candidate.text !== 'string') continue
     if (decidedCandidateIds.has(candidate.id)) continue
-    const sha = commitShaForSource(candidate.source)
+    const sha = commitShaForSource(candidate.source).toLowerCase()
     if (sha && inboxCommitShas.has(sha)) continue
     const normalized = normalizeText(candidate.text)
     if (firsthandTexts.has(normalized)) continue
@@ -297,12 +326,16 @@ function exactCompletions({ firsthand, candidates, openTodosSnapshot }) {
 }
 
 function interpretMatchResult({ result, firsthand, candidates, openTodosSnapshot, completionCandidates }) {
-  const knownIds = new Set([...firsthand.map(e => e.id), ...candidates.map(c => c.id)])
+  // merge 只允许「候选 → 一手记录」:duplicateOf 指向另一候选时不生效,
+  // 否则目标候选被用户 reject 后,被合并掉的那件工作会无声消失
+  const firsthandIds = new Set(firsthand.map(e => e.id))
+  const candidateIds = new Set(candidates.map(c => c.id))
   const mergedIds = new Set()
   for (const merge of Array.isArray(result?.merges) ? result.merges : []) {
     if (!merge || typeof merge.candidateId !== 'string' || typeof merge.duplicateOf !== 'string') continue
     if (merge.candidateId === merge.duplicateOf) continue
-    if (!knownIds.has(merge.duplicateOf)) continue
+    if (!candidateIds.has(merge.candidateId)) continue
+    if (!firsthandIds.has(merge.duplicateOf)) continue
     mergedIds.add(merge.candidateId)
   }
 
@@ -327,17 +360,19 @@ function interpretMatchResult({ result, firsthand, candidates, openTodosSnapshot
   return { mergedIds, completions, overview }
 }
 
-async function detectSupplement({ paths, snapshot, date }) {
-  const status = snapshot?.days?.[date]?.status
-  if (status !== 'confirmed' && status !== 'supplemented') return null
+async function detectSupplement({ paths, date }) {
   const log = await readJsonl(paths.ledgerLog)
-  let lastAppliedAtMs = Number.NEGATIVE_INFINITY
+  const enteredEventIds = new Set()
   const decidedCandidateIds = new Set()
+  let hasSettlingTx = false
   for (const tx of log.rows) {
     if (!tx || tx.date !== date) continue
-    const appliedAtMs = Date.parse(tx.appliedAt)
-    if (Number.isFinite(appliedAtMs) && appliedAtMs > lastAppliedAtMs) lastAppliedAtMs = appliedAtMs
     const confirmation = tx.confirmation || {}
+    if (confirmation.skipDay === true) continue // 跳过日之后的结算按普通草稿走
+    hasSettlingTx = true
+    for (const event of Array.isArray(tx.resolvedEvents) ? tx.resolvedEvents : []) {
+      if (event && event.id) enteredEventIds.add(event.id)
+    }
     for (const id of Array.isArray(confirmation.acceptCandidates) ? confirmation.acceptCandidates : []) {
       decidedCandidateIds.add(id)
     }
@@ -345,8 +380,8 @@ async function detectSupplement({ paths, snapshot, date }) {
       decidedCandidateIds.add(id)
     }
   }
-  if (!Number.isFinite(lastAppliedAtMs)) return null
-  return { lastAppliedAtMs, decidedCandidateIds }
+  if (!hasSettlingTx) return null
+  return { enteredEventIds, decidedCandidateIds }
 }
 
 function stringArrayField(value, name) {

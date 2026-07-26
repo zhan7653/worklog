@@ -47,12 +47,16 @@ print(json.dumps({k: os.environ["WL_" + k.upper()] for k in keys}, ensure_ascii=
 }
 
 redact() {
+  # 模式集与冷路径 util.js redactText 对齐;不用 GNU 专属 \b(BSD sed 不支持),
+  # 用 (^|[^字词字符]) 前缀捕获保证 macOS 可移植
   printf '%s' "$1" | sed -E \
-    -e 's/\b(sk|pk|rk)-[A-Za-z0-9_-]{8,}/[REDACTED]/g' \
-    -e 's/\bgithub_pat_[A-Za-z0-9_]{20,}/[REDACTED]/g' \
-    -e 's/\bgh[pousr]_[A-Za-z0-9]{20,}/[REDACTED]/g' \
-    -e 's/\bAKIA[0-9A-Z]{16}\b/[REDACTED]/g' \
-    -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._-]{16,}/\1[REDACTED]/g' \
+    -e 's/(^|[^A-Za-z0-9_])(sk|pk|rk)-[A-Za-z0-9_-]{8,}/\1[REDACTED]/g' \
+    -e 's/(^|[^A-Za-z0-9_])github_pat_[A-Za-z0-9_]{20,}/\1[REDACTED]/g' \
+    -e 's/(^|[^A-Za-z0-9_])gh[pousr]_[A-Za-z0-9]{20,}/\1[REDACTED]/g' \
+    -e 's/(^|[^A-Za-z0-9_])AKIA[0-9A-Z]{16}/\1[REDACTED]/g' \
+    -e 's/(^|[^A-Za-z0-9_])eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}/\1[REDACTED]/g' \
+    -e 's/([Bb][Ee][Aa][Rr][Ee][Rr][[:space:]]+)[A-Za-z0-9._-]{16,}/\1[REDACTED]/g' \
+    -e 's/(([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Pp][Aa][Ss][Ss][Ww][Dd]|[Pp][Ww][Dd]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]|[Aa][Cc][Cc][Ee][Ss][Ss][_-]?[Kk][Ee][Yy])[[:space:]]*[=:][[:space:]]*)[^[:space:]]+/\1[REDACTED]/g' \
     -e 's/[[:alnum:]._+-]+@[[:alnum:]-]+\.[[:alnum:].-]+/[REDACTED]/g'
 }
 

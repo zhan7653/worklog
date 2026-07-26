@@ -8,7 +8,8 @@ import { eventId, redactText } from '../util.js'
 const execFileAsync = promisify(execFile)
 const FIELD_SEP = '\u001f'
 const RECORD_SEP = '\u001e'
-const GIT_FORMAT = '%H%x1f%h%x1f%s%x1f%aI%x1e'
+// ts 取提交者日期 %cI,与 --since/--until 的过滤锚点一致(作者日期在 rebase/cherry-pick 后可能跨日)
+const GIT_FORMAT = '%H%x1f%h%x1f%s%x1f%cI%x1e'
 const GIT_TIMEOUT_MS = 15000
 const GIT_MAX_BUFFER = 16 * 1024 * 1024
 const ERROR_SNIPPET_LIMIT = 200
@@ -18,7 +19,8 @@ export async function collectGitlog({ date, timezone, reposListPath, knownCommit
   const range = localDayUtcRange(date, resolvedTimezone)
   const startIso = stripMilliseconds(range.startIso)
   const endIso = stripMilliseconds(range.endIso)
-  const known = knownCommitSources instanceof Set ? knownCommitSources : new Set(knownCommitSources || [])
+  const knownRaw = knownCommitSources instanceof Set ? knownCommitSources : new Set(knownCommitSources || [])
+  const known = new Set([...knownRaw].map(value => String(value).toLowerCase()))
 
   const scan = {
     reposListPath: reposListPath || '',
@@ -43,6 +45,13 @@ export async function collectGitlog({ date, timezone, reposListPath, knownCommit
       continue
     }
 
+    // per-repo 逃生门(FR-13):git config worklog.capture false 的仓库,考古兜底同样跳过,
+    // 否则"先用后关"的仓库提交仍会以候选身份回到确认面
+    if ((await gitConfigValue(repoPath, 'worklog.capture')) === 'false') {
+      entry.status = 'opted-out'
+      continue
+    }
+
     let stdout
     try {
       const result = await execFileAsync(
@@ -60,7 +69,8 @@ export async function collectGitlog({ date, timezone, reposListPath, knownCommit
       stdout = result.stdout
     } catch (error) {
       entry.status = 'git-error'
-      entry.error = String(error?.stderr || error?.message || error).trim().slice(0, ERROR_SNIPPET_LIMIT)
+      // stderr 可能含带凭据的 remote URL,入 day.json 前脱敏(FR-12)
+      entry.error = redactText(String(error?.stderr || error?.message || error).trim().slice(0, ERROR_SNIPPET_LIMIT))
       continue
     }
 
@@ -73,22 +83,22 @@ export async function collectGitlog({ date, timezone, reposListPath, knownCommit
         entry.badRecords += 1
         continue
       }
-      const [fullSha, shortSha, subject, authorIso] = fields.map(field => field.trim())
-      if (!fullSha || !shortSha || !authorIso) {
+      const [fullSha, shortSha, subject, committerIso] = fields.map(field => field.trim())
+      if (!fullSha || !shortSha || !committerIso) {
         entry.badRecords += 1
         continue
       }
       entry.commitCount += 1
       if (!subject) continue
-      if (known.has(`commit:${shortSha}`) || known.has(`commit:${fullSha}`)) continue
+      if (known.has(`commit:${shortSha.toLowerCase()}`) || known.has(`commit:${fullSha.toLowerCase()}`)) continue
       if (seenShas.has(fullSha)) continue
       seenShas.add(fullSha)
       entry.newCount += 1
 
       const text = redactText(subject)
       candidates.push({
-        id: eventId(authorIso, text),
-        ts: authorIso,
+        id: eventId(committerIso, text),
+        ts: committerIso,
         type: 'done',
         text,
         project,
@@ -125,6 +135,18 @@ async function isDirectory(candidatePath) {
     return (await fs.stat(candidatePath)).isDirectory()
   } catch {
     return false
+  }
+}
+
+async function gitConfigValue(repoPath, key) {
+  try {
+    const { stdout } = await execFileAsync('git', ['-C', repoPath, 'config', '--get', key], {
+      timeout: GIT_TIMEOUT_MS,
+      windowsHide: true,
+    })
+    return String(stdout).trim()
+  } catch {
+    return ''
   }
 }
 

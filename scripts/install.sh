@@ -109,6 +109,9 @@ cp -f "$REPO_ROOT/hooks/post-commit"     "$WL_HOME/git-hooks/post-commit"
 tmp_scripts="$WL_HOME/scripts/.worklog.tmp-$$"
 rm -rf "$tmp_scripts"
 cp -R "$REPO_ROOT/scripts/worklog" "$tmp_scripts"
+# 副本必须自带 type:module 声明:仓库里由根 package.json 覆盖,副本脱离仓库后
+# node(<22.7)会按 CJS 加载 ESM 源码,冷路径全部命令直接语法错误
+printf '{\n  "type": "module"\n}\n' >"$tmp_scripts/package.json"
 rm -rf "$WL_HOME/scripts/worklog"
 mv "$tmp_scripts" "$WL_HOME/scripts/worklog"
 
@@ -133,8 +136,9 @@ if [ -L "$link" ]; then
     ln -sfn "$WL_HOME/bin/wl" "$link"
   fi
 elif [ -e "$link" ]; then
-  info "覆盖既有文件 $link(原为普通文件,非本安装器所建)"
-  rm -f "$link"
+  link_backup="$link.bak-$(date +%F)"
+  info "检测到 $link 是普通文件(非本安装器所建),已备份为 $link_backup 再替换为软链"
+  mv -f "$link" "$link_backup"
   ln -s "$WL_HOME/bin/wl" "$link"
 else
   ln -s "$WL_HOME/bin/wl" "$link"
@@ -156,6 +160,7 @@ else
     info "已设置 git config --global core.hooksPath=$WL_HOME/git-hooks"
     warn "core.hooksPath 全局生效会遮蔽各仓库本地 .git/hooks/*(含 husky 等工具安装的钩子)"
     info "worklog 的 post-commit 已内置链式回调本地钩子:各仓库本地 post-commit 仍会执行;其他类型钩子(pre-commit 等)如有依赖,请在 $WL_HOME/git-hooks 下自行补同名转发脚本"
+    info "注意:设置了仓库本地 core.hooksPath 的仓库(husky v5+ 的标准安装即如此)会覆盖全局配置,worklog 钩子在这类仓库不会运行——请在其钩子目录的 post-commit 末尾追加:\"$WL_HOME/git-hooks/post-commit\" \"\$@\" || true"
   elif [ "$(expand_tilde "$current_hooks")" = "$WL_HOME/git-hooks" ]; then
     info "core.hooksPath 已指向 $WL_HOME/git-hooks,跳过"
   else
@@ -185,7 +190,9 @@ else
   fi
   merged_tmp="$(mktemp "${TMPDIR:-/tmp}/wl-hooks-merged.XXXXXX")"
   if merge_hooks_json "$hooks_target" "$frag_tmp" >"$merged_tmp"; then
-    mv -f "$merged_tmp" "$hooks_target"
+    # 用 cat 透写而非 mv:hooks.json 若是指向 dotfiles 仓库的软链,不打断链接关系
+    cat "$merged_tmp" >"$hooks_target"
+    rm -f "$merged_tmp"
     info "已把 worklog hooks 合并进 $hooks_target(同事件数组按 command 去重追加,既有条目未删改)"
   else
     rm -f "$merged_tmp"
@@ -203,11 +210,20 @@ printf '\n'
 cat "$REPO_ROOT/agents-md/global-line.md"
 printf '\n'
 
-# ── 6/6 安装自检 ──
+# ── 6/6 安装自检(热路径 + 冷路径都要探活)──
 info "==> 6/6 安装自检"
 WL_HOME="$WL_HOME" "$WL_HOME/bin/wl" note --project install-check -- "installed"
 info "已写入一条自检记录,inbox 尾行:"
 tail -n 1 "$WL_HOME/inbox.jsonl"
-info "该行可留着,也可手动删掉($WL_HOME/inbox.jsonl 末行)"
+info "该行会出现在当日确认面,按普通记录点头或拒绝即可(inbox 只追加,不建议手改)"
+if command -v node >/dev/null 2>&1; then
+  if WL_HOME="$WL_HOME" "$WL_HOME/bin/wl" render --all >/dev/null; then
+    info "冷路径探活通过(wl render --all)"
+  else
+    die "冷路径探活失败:安装副本的 Node 冷路径不可用,请检查 node >= 18 与 $WL_HOME/scripts/worklog"
+  fi
+else
+  warn "未找到 node:热路径(捕获/提醒)可用,冷路径(assemble/commit/render)需要 Node >= 18"
+fi
 
 info "安装完成:WL_HOME=$WL_HOME"

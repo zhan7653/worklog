@@ -410,6 +410,71 @@ EOF
   assert_eq 'post-commit: worklog.capture=false 不落行' "$before" "$(count_lines "$inbox")"
 }
 
+# ---------- 9. 提醒链路加固回归(对抗审查修复项) ----------
+
+test_remind_hardening() {
+  local remind="$HOOKS_DIR/remind.sh"
+  local daily="$HOOKS_DIR/remind-daily.sh"
+  local home out rc yd
+
+  # inbox 截断残行(崩溃残迹)不得伪造欠账注入
+  new_sandbox; home="$SB"
+  printf '{"ts":"2026-07-2' >"$home/inbox.jsonl"
+  out="$(env WL_HOME="$home" sh "$remind" 2>/dev/null)"; rc=$?
+  assert_eq 'remind加固: 截断残行 exit 0' 0 "$rc"
+  assert_eq 'remind加固: 截断残行零输出' '' "$out"
+
+  # 字节 8-17 恰为日期形状的垃圾行同样不得伪造欠账
+  new_sandbox; home="$SB"
+  printf 'AAAAAAA2020-01-01ZZZZZ\n' >"$home/inbox.jsonl"
+  out="$(env WL_HOME="$home" sh "$remind" 2>/dev/null)"; rc=$?
+  assert_eq 'remind加固: 垃圾行 exit 0' 0 "$rc"
+  assert_eq 'remind加固: 垃圾行零输出' '' "$out"
+
+  # 每本地日至多注入一次:同沙箱二次调用(模拟同日新会话 SessionStart)静默
+  new_sandbox; home="$SB"
+  yd="$(rel_date 1)"
+  inbox_line "$yd" done once-item "$home/inbox.jsonl"
+  out="$(env WL_HOME="$home" sh "$remind")"; rc=$?
+  assert_contains 'remind加固: 首次注入含欠账日期' "$out" "$yd"
+  out="$(env WL_HOME="$home" sh "$remind")"; rc=$?
+  assert_eq 'remind加固: 同日二次调用 exit 0' 0 "$rc"
+  assert_eq 'remind加固: 同日二次调用零输出(notified 标记)' '' "$out"
+  # --human 不受 notified 标记限制
+  out="$(env WL_HOME="$home" sh "$remind" --human)"
+  assert_contains 'remind加固: --human 不受标记限制' "$out" 'worklog:'
+
+  # state 目录不可写:每条 prompt 必须 rc=0 且零 stderr(故障静默红线)
+  new_sandbox; home="$SB"
+  inbox_line "$(rel_date 1)" done quiet-item "$home/inbox.jsonl"
+  mkdir -p "$home/state"
+  chmod 555 "$home/state"
+  local errfile="$home.err"
+  out="$(env WL_HOME="$home" sh "$daily" 2>"$errfile")"; rc=$?
+  chmod 755 "$home/state"
+  assert_eq 'remind加固: state 只读时 remind-daily exit 0' 0 "$rc"
+  assert_eq 'remind加固: state 只读时零输出' '' "$out"
+  assert_eq 'remind加固: state 只读时零 stderr' '' "$(cat "$errfile")"
+
+  # 并发首 prompt:两个 remind-daily 同时启动,至多一个产生注入(noclobber 原子建档)
+  new_sandbox; home="$SB"
+  inbox_line "$(rel_date 1)" done race-item "$home/inbox.jsonl"
+  local out1_file="$home.out1" out2_file="$home.out2"
+  env WL_HOME="$home" sh "$daily" >"$out1_file" 2>/dev/null &
+  local pid1=$!
+  env WL_HOME="$home" sh "$daily" >"$out2_file" 2>/dev/null &
+  local pid2=$!
+  wait "$pid1" "$pid2" 2>/dev/null
+  local nonempty=0
+  [ -s "$out1_file" ] && nonempty=$((nonempty + 1))
+  [ -s "$out2_file" ] && nonempty=$((nonempty + 1))
+  if [ "$nonempty" -le 1 ]; then
+    pass 'remind加固: 并发首 prompt 至多一次注入'
+  else
+    fail "remind加固: 并发首 prompt 注入了 $nonempty 次"
+  fi
+}
+
 # ---------- 入口 ----------
 
 main() {
@@ -433,6 +498,7 @@ main() {
   test_remind
   test_remind_daily
   test_post_commit
+  test_remind_hardening
 
   printf '\nhotpath: %d passed, %d failed\n' "$PASS" "$FAIL"
   [ "$FAIL" -eq 0 ] || exit 1

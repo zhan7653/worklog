@@ -89,14 +89,26 @@ async function runCodex(codexBin, prompt, options) {
   const stderrHandle = await fs.open(stderrPath, 'w')
 
   try {
+    const timeoutMs = parseTimeoutMs(process.env.WORKLOG_MATCH_TIMEOUT_MS)
     const code = await new Promise((resolve, reject) => {
       const child = spawn(codexBin, args, {
         cwd: tempDir,
         stdio: ['pipe', stdoutHandle.fd, stderrHandle.fd],
         env: process.env,
       })
-      child.on('error', reject)
-      child.on('close', resolve)
+      // 挂起型故障也要走降级(FR-7):codex 卡死不能把 assemble 无限拖死
+      const timer = setTimeout(() => {
+        child.kill('SIGKILL')
+        reject(new Error(`codex exec timed out after ${timeoutMs}ms`))
+      }, timeoutMs)
+      child.on('error', error => {
+        clearTimeout(timer)
+        reject(error)
+      })
+      child.on('close', value => {
+        clearTimeout(timer)
+        resolve(value)
+      })
       // 子进程早退时写 stdin 会抛 EPIPE,未挂 error 处理会打崩整个进程(V1 缺陷修复)。
       // 真实失败由退出码与 stderr 呈现,这里只吞掉流错误。
       child.stdin.on('error', () => {})
@@ -115,6 +127,12 @@ async function runCodex(codexBin, prompt, options) {
     await stderrHandle.close().catch(() => {})
     await fs.rm(tempDir, { recursive: true, force: true })
   }
+}
+
+function parseTimeoutMs(value) {
+  const number = Number(value)
+  if (Number.isInteger(number) && number > 0) return number
+  return 120000
 }
 
 export function buildCodexArgs({

@@ -63,7 +63,8 @@ export async function collectCodex({ date, codexHome, timezone, lookbackDays = D
 function candidatesForSession(session) {
   const project = session.cwd ? path.basename(session.cwd) : ''
   const source = `archaeology:codex:${session.id}`
-  const doneText = session.title || session.firstUserMessage.slice(0, DONE_TEXT_LIMIT) || session.id
+  // 先脱敏后截断:截断把 token 切短到低于脱敏模式下限时,残段会逃过替换(FR-12)
+  const doneText = session.title || redactText(session.firstUserMessage).slice(0, DONE_TEXT_LIMIT) || session.id
   const out = [makeCandidate({ ts: session.endedAt, type: 'done', text: doneText, project, source })]
   for (const todo of session.todos) {
     out.push(makeCandidate({ ts: todo.ts, type: 'todo', text: todo.text, project, source }))
@@ -213,7 +214,8 @@ function cleanListMarker(value) {
 }
 
 function sanitize(value, limit) {
-  const text = String(value ?? '').replace(/\s+/g, ' ').trim()
+  // 先脱敏后截断(FR-12):截断切进 token 中段会让残段逃过模式匹配
+  const text = redactText(String(value ?? '')).replace(/\s+/g, ' ').trim()
   if (!text) return ''
   if (text.length <= limit) return text
   return `${text.slice(0, limit)}...`

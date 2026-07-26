@@ -3,6 +3,7 @@
 日期:2026-07-26
 依据:`2026-07-26-worklog-event-capture-daily-report-spec.md`(下称"设计规格")
 状态:实现定稿,按阶段 M0–M4 交付
+勘误(2026-07-27 实现期修正):行首日期在第 8-17 字符(原文 c9-18 为 off-by-one);assemble 参数为 --lookback-days。
 
 命名占位:根目录 `~/.worklog`、命令 `wl`(设计规格待定决策 2)。全部代码经 `WL_HOME` 环境变量与安装器中的单一变量取名,改名成本为一处。
 
@@ -173,7 +174,7 @@ confirmed="$(jq -r '.confirmedThrough // "1970-01-01"' "$LEDGER" 2>/dev/null \
              || echo 1970-01-01)"
 
 # 有数据的日期 = inbox 中出现过的日期(升序去重),过滤 (confirmed, today)
-days="$(cut -c9-18 "$WL_HOME/inbox.jsonl" 2>/dev/null | sort -u \
+days="$(cut -c8-17 "$WL_HOME/inbox.jsonl" 2>/dev/null | sort -u \
         | awk -v a="$confirmed" -v b="$today" '$0 > a && $0 < b')"
 [ -n "$days" ] || exit 0                      # 无欠账:零输出零注入(AC-2)
 
@@ -190,7 +191,7 @@ printf '[worklog] %s 有未确认记录(最近一日 %s 条)。仅在答完用�
 
 实现注解:
 
-- `cut -c9-18` 依赖 FR-2 固定行首 `{"ts":"YYYY-MM-DD…`——jq 键序稳定,契约成立;测试锁住该假设。
+- `cut -c8-17` 依赖 FR-2 固定行首 `{"ts":"YYYY-MM-DD…`——jq 键序稳定,契约成立;测试锁住该假设。
 - 只以 inbox 判定"有数据",不做日期算术(BSD/GNU `date -d` 差异整个绕开)。纯考古日(inbox 空但 codex 有会话)提醒不到,由显式触发与下次结算覆盖——设计规格 FR-10 的窄缝,记录为已知取舍。
 - 无数据日的 skipped 标记不在这里写(热路径不碰 ledger),由下次提交器结算时补记。
 - 任何失败(ledger 缺失、inbox 缺失)走 `|| echo` 默认值或直接 exit 0——故障静默。
@@ -292,7 +293,7 @@ printf '[worklog] %s 有未确认记录(最近一日 %s 条)。仅在答完用�
 
 ### 5.2 `bin/worklog.js` 子命令契约
 
-- `assemble --date D [--timezone TZ] [--lookback N]`:读 inbox 当日行 + 跑采集器 → 确定性去重(sha 精确、归一化文本精确)→ 可选调 match.js → 写 `days/D/day.json`。stdout 输出路径 JSON。
+- `assemble --date D [--timezone TZ] [--lookback-days N]`:读 inbox 当日行 + 跑采集器 → 确定性去重(sha 精确、归一化文本精确)→ 可选调 match.js → 写 `days/D/day.json`。stdout 输出路径 JSON。
 - `confirm --date D --patch <file|->`:校验 confirmation 结构与 id 存在性后落盘 `days/D/confirmation.json`(仅校验与写入,不动 ledger)。
 - `commit --date D`:提交器,见 5.3。
 - `render --date D | --range M | --all [--html]`:由 ledger + day.json 渲染视图。
@@ -384,7 +385,7 @@ export async function commitDay({ paths, date }) {
 热路径 `tests/hotpath.test.sh`(临时 WL_HOME 沙箱):
 
 - 捕获:四命令落行、jq 转义(文本含引号/换行/中文)、flock 并发 50 进程无交错(AC-1 基础)。
-- 行首契约:`cut -c9-18` 能取出日期(锁 FR-2 键序)。
+- 行首契约:`cut -c8-17` 能取出日期(锁 FR-2 键序)。
 - remind:无欠账零输出(AC-2);单日/多日区间文案;标记文件二次调用 exit 0 且零输出(AC-3 的本地等价);ledger 缺失静默。
 - post-commit:临时仓库 commit → inbox 出现对应行;merge 跳过;本地钩子链式回调被执行;repos.list 去重登记。
 

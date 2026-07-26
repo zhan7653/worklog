@@ -89,7 +89,8 @@ export async function appendJsonLine(filePath, value) {
 
 export async function atomicWrite(filePath, content) {
   await fs.mkdir(path.dirname(filePath), { recursive: true })
-  const tempPath = `${filePath}.tmp-${process.pid}`
+  // pid 之外再加随机后缀:同进程并发写同一目标时临时名不碰撞
+  const tempPath = `${filePath}.tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`
   const handle = await fs.open(tempPath, 'w')
   try {
     await handle.writeFile(content, 'utf8')

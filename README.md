@@ -6,7 +6,7 @@
 
 ## 三层捕获链
 
-1. **git 钩子(机械,主承重)**:全局 `core.hooksPath` 下的 `post-commit` 把每次非 merge 提交自动记为一条 done 事件(`wl done --source commit:<sha>`)。rebase/amend 产生的重复由装配器按 sha 去重,钩子只管傻写。
+1. **git 钩子(机械,主承重)**:全局 `core.hooksPath` 下的 `post-commit` 把每次非 merge 提交自动记为一条 done 事件(`wl done --source commit:<sha>`)。rebase/amend 产生的重复由装配器去重(commit 来源按"项目 + 归一化文本"),钩子只管傻写。
 2. **口头触发词(半机械,唯一常驻指令)**:对 agent 说「记一下」→ note、「记个待办」→ todo、「记个想法」→ idea,agent 立即执行对应 `wl` 命令并继续当前任务。触发词固定,判断权在你——agent 不自行揣测某句话"像不像想法"。
 3. **agent 交付 tee(尽力而为)**:power-gan 交付收尾报告的同时顺手 `wl done --source session:<id>`。
 
@@ -22,7 +22,7 @@ bash scripts/install.sh
 
 1. 建 `~/.worklog/{ledger,days,state}`,把 `bin/ hooks/ scripts/` 复制到 `~/.worklog` 下(hook 配置指向副本,与克隆目录解耦),`chmod +x`。
 2. 软链 `~/.local/bin/wl`(不在 PATH 时给出提示)。
-3. **`git config --global core.hooksPath`**:未设置 → 指向 `~/.worklog/git-hooks`,并打印遮蔽警告——全局 hooksPath 会遮蔽各仓库 `.git/hooks/`,因此 `post-commit` 内建链式回调,husky 等本地钩子仍会被执行;已设置为其他值 → **不覆盖**,打印在你既有钩子目录里追加两行调用的说明。
+3. **`git config --global core.hooksPath`**:未设置 → 指向 `~/.worklog/git-hooks`,并打印遮蔽警告——全局 hooksPath 会遮蔽各仓库 `.git/hooks/`,因此 `post-commit` 内建链式回调,`.git/hooks/` 式的本地钩子仍会被执行;已设置为其他值 → **不覆盖**,打印在你既有钩子目录里追加两行调用的说明。**注意**:设置了仓库本地 `core.hooksPath` 的仓库(husky v5+ 标准安装即如此)会覆盖全局配置,worklog 钩子在这类仓库不会运行——需要在其钩子目录的 `post-commit` 末尾手工追加一行 `"$HOME/.worklog/git-hooks/post-commit" "$@" || true`,否则该仓库既无捕获也不入 gitlog 考古兜底。
 4. **`~/.codex/hooks.json`**:不存在 → 写入提醒 hook 片段(SessionStart + UserPromptSubmit,见 `hooks/hooks.codex.json`);已存在 → 先备份,再 jq 深合并(同事件数组追加,不删既有项)。Codex 首次会请求信任非托管 hook;可用 `codex features list` 确认 hooks 开关。
 5. 打印全局 AGENTS.md 需要的那一行(口头触发词指令,见 `agents-md/global-line.md`),由你自行粘贴——安装器不改你的全局指令文件。
 6. 自校验:执行一条 `wl note --project install-check -- "installed"` 并展示 inbox 尾行。
@@ -77,8 +77,9 @@ wl status
 | `WL_HOME` | 根目录 | `~/.worklog` |
 | `WORKLOG_MATCH_MODEL` | LLM 匹配层模型;**不设置则匹配层关闭**,候选原样展示、概览用模板句 | 无(必须显式设置才启用) |
 | `WORKLOG_CODEX_BIN` | 匹配层调用的 codex 可执行 | `codex` |
-| `WORKLOG_MATCH_REASONING_EFFORT` | 推理档位,白名单 `minimal\|low\|medium\|high\|xhigh` | 不传 |
-| `git config worklog.capture false` | **per-repo 关闭** commit 捕获 | 开启 |
+| `WORKLOG_MATCH_REASONING_EFFORT` | 推理档位,白名单 `minimal\|low\|medium\|high\|xhigh` | `medium` |
+| `WORKLOG_MATCH_TIMEOUT_MS` | 匹配层子进程超时(毫秒),超时即降级 | `120000` |
+| `git config worklog.capture false` | **per-repo 关闭**:commit 捕获与 gitlog 考古兜底都跳过该仓库 | 开启 |
 
 ## 逃生门
 
@@ -87,7 +88,7 @@ wl status
 - **跳过今天**:确认对话里回一句「跳过今天」,该日记 skipped,不再提。
 - **明天一起**:不回应即可;当日不再提醒,次日欠账合并为一行区间提示。
 - **多日批量补账**:多天欠账时逐日最小摘要,摘要压缩更狠,不搞长审讯。
-- **per-repo 关闭**:在仓库里 `git config worklog.capture false`。
+- **per-repo 关闭**:在仓库里 `git config worklog.capture false`,commit 捕获与 gitlog 考古兜底一并跳过。
 - **提醒降级**(各为一行配置的切换):
   - 方案 B:从 `~/.codex/hooks.json` 删掉 `UserPromptSubmit` 段,仅保留 SessionStart 提醒。
   - 方案 C:删掉两段 hook 配置,提醒完全撤出 agent;把 `wl status` 挂到 shell 提示符(`PROMPT_COMMAND` / `precmd`)。

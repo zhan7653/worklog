@@ -1,9 +1,12 @@
+import path from 'node:path'
+import { promises as fs } from 'node:fs'
 import { assertValidDate, wlPaths } from './paths.js'
 import {
   appendJsonLine,
   atomicWrite,
   canonicalJson,
   isoNow,
+  readJson,
   readJsonl,
   readRequiredJson,
   sha256Hex,
@@ -20,49 +23,131 @@ const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/
 export async function commitDay({ wlHome, date }) {
   assertValidDate(date)
   const paths = wlPaths(wlHome)
-  const confirmation = await readRequiredJson(paths.confirmation(date))
-  const txId = `${date}:${sha256Hex(canonicalJson(confirmation))}`
-  const { rows: log } = await readJsonl(paths.ledgerLog)
+  return withLedgerLock(paths, async () => {
+    const confirmation = await readRequiredJson(paths.confirmation(date))
+    assertMatchingDate('confirmation.json', confirmation?.date, date)
+    const patch = normalizeConfirmation(confirmation)
+    // 跳过日零成本(FR-8/AC-13):skipDay 不要求先 assemble,day.json 允许缺席
+    const day = patch.skipDay ? await readJson(paths.dayJson(date), null) : await readRequiredJson(paths.dayJson(date))
+    if (day) assertMatchingDate('day.json', day.date, date)
 
-  if (log.some(tx => tx && tx.txId === txId)) {
-    // AC-7:重复应用零副作用;视图是缓存,顺手刷新以修复「log 已写、视图未渲染」的崩溃窗口
-    await refreshView(wlHome, date)
-    return { txId, noop: true }
-  }
+    // txId 由 (date, confirmation, 草稿事件身份) 共同派生:同一草稿+同一补丁重复执行仍幂等(AC-7),
+    // 而补充结算即使补丁与首轮逐字节相同(最常见的空补丁流)也不会与首轮碰撞(AC-10)
+    const txId = `${date}:${sha256Hex(canonicalJson(txIdentity(day, confirmation)))}`
+    const { rows: log } = await readJsonl(paths.ledgerLog)
 
-  const day = await readRequiredJson(paths.dayJson(date))
-  const appliedAt = isoNow()
-  const resolved = resolve(day, confirmation, appliedAt)
-  const state = replay(log)
+    if (log.some(tx => tx && tx.txId === txId)) {
+      // AC-7:重复应用零副作用;视图是缓存,顺手刷新以修复「log 已写、视图未渲染」的崩溃窗口
+      await refreshView(wlHome, date)
+      return { txId, noop: true }
+    }
 
-  // 无数据欠账日:批量补记 skipped 事务,(confirmedThrough, date) 开区间(实现方案 §5.3)
-  const transactions = []
-  const inboxDates = await readInboxDates(paths.inbox)
-  for (const skipDate of missingDays({ state, date, inboxDates })) {
-    const skipConfirmation = { date: skipDate, skipDay: true }
+    const appliedAt = isoNow()
+    const resolved = resolve(day, confirmation, appliedAt)
+    const state = replay(log)
+
+    // 空补充(重新装配后无任何新内容)不落事务,避免无意义的 supplemented 翻转
+    if (day?.mode === 'supplement' && !resolved.events.length && !patch.completeTodos.length) {
+      await refreshView(wlHome, date)
+      return { txId, noop: true }
+    }
+
+    const inboxDates = await readInboxDates(paths.inbox)
+
+    // 乱序结算闸门:区间内有数据且未结算的日子不允许被 confirmedThrough 静默吞掉,
+    // 必须先逐日结算或显式跳过(FR-10 欠账收敛语义)
+    const pendingDataDays = []
+    for (const gapDate of gapDays({ state, date })) {
+      if (inboxDates.has(gapDate) && !state.days[gapDate]) pendingDataDays.push(gapDate)
+    }
+    if (pendingDataDays.length) {
+      throw new Error(
+        `Cannot settle ${date}: earlier days with data are still unsettled: ${pendingDataDays.join(', ')}. ` +
+          'Settle them first (wl assemble --date <D> → confirm → commit) or skip them explicitly ' +
+          '(confirm {"skipDay":true} → commit).',
+      )
+    }
+
+    // 无数据欠账日:批量补记 skipped 事务,(confirmedThrough, date) 开区间(实现方案 §5.3)
+    const transactions = []
+    for (const skipDate of gapDays({ state, date })) {
+      if (inboxDates.has(skipDate) || state.days[skipDate]) continue
+      const skipConfirmation = { date: skipDate, skipDay: true }
+      transactions.push({
+        txId: `${skipDate}:${sha256Hex(canonicalJson(skipConfirmation))}`,
+        date: skipDate,
+        appliedAt,
+        confirmation: skipConfirmation,
+        resolvedEvents: [],
+      })
+    }
     transactions.push({
-      txId: `${skipDate}:${sha256Hex(canonicalJson(skipConfirmation))}`,
-      date: skipDate,
+      txId,
+      date,
       appliedAt,
-      confirmation: skipConfirmation,
-      resolvedEvents: [],
+      ...(day?.mode === 'supplement' ? { mode: 'supplement' } : {}),
+      confirmation,
+      resolvedEvents: resolved.events,
     })
-  }
-  transactions.push({
-    txId,
-    date,
-    appliedAt,
-    ...(day.mode === 'supplement' ? { mode: 'supplement' } : {}),
-    confirmation,
-    resolvedEvents: resolved.events,
-  })
 
-  for (const tx of transactions) applyTx(state, tx)
-  // 先追加 log 后换快照:崩在中间 = 快照落后,rebuild 天然修复(NFR 故障模型)
-  for (const tx of transactions) await appendJsonLine(paths.ledgerLog, tx)
-  await atomicWrite(paths.ledgerSnapshot, snapshotContent(state))
-  await refreshView(wlHome, date)
-  return { txId, noop: false }
+    for (const tx of transactions) applyTx(state, tx)
+    // 先追加 log 后换快照:崩在中间 = 快照落后,rebuild 天然修复(NFR 故障模型)
+    for (const tx of transactions) await appendJsonLine(paths.ledgerLog, tx)
+    await atomicWrite(paths.ledgerSnapshot, snapshotContent(state))
+    await refreshView(wlHome, date)
+    return { txId, noop: false }
+  })
+}
+
+// 事务身份:confirmation + 草稿事件 id 集(事件 id 由 ts+text 确定性派生,
+// 不含 assembledAt 之类的墙钟字段,重新装配同样内容得到同一身份)
+function txIdentity(day, confirmation) {
+  return {
+    confirmation,
+    mode: day?.mode || 'full',
+    firsthand: asArray(day?.firsthand).map(event => String(event?.id || '')),
+    candidates: asArray(day?.candidates).map(event => String(event?.id || '')),
+  }
+}
+
+function assertMatchingDate(label, value, date) {
+  if (value !== undefined && value !== null && value !== '' && value !== date) {
+    throw new Error(`${label} has date "${value}" but --date is ${date}; refusing to settle mismatched files.`)
+  }
+}
+
+// 冷路径结算锁:mkdir 原子创建,持有者崩溃留下的陈旧锁按 mtime 超时清除。
+// 并发 commit/rebuild/import 串行化,防止双双通过 txId 检查后重复追加(AC-7)。
+async function withLedgerLock(paths, fn) {
+  const lockDir = path.join(paths.ledgerDir, '.lock')
+  await fs.mkdir(paths.ledgerDir, { recursive: true })
+  const deadline = Date.now() + 10000
+  for (;;) {
+    try {
+      await fs.mkdir(lockDir)
+      break
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error
+      try {
+        const stats = await fs.stat(lockDir)
+        if (Date.now() - stats.mtimeMs > 30000) {
+          await fs.rm(lockDir, { recursive: true, force: true })
+          continue
+        }
+      } catch {
+        continue
+      }
+      if (Date.now() > deadline) {
+        throw new Error(`ledger is locked by another worklog process (${lockDir}); retry later or remove a stale lock`)
+      }
+      await new Promise(resolveWait => setTimeout(resolveWait, 50 + Math.floor(Math.random() * 50)))
+    }
+  }
+  try {
+    return await fn()
+  } finally {
+    await fs.rm(lockDir, { recursive: true, force: true }).catch(() => {})
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -71,10 +156,16 @@ export async function commitDay({ wlHome, date }) {
 
 export async function rebuildLedger({ wlHome }) {
   const paths = wlPaths(wlHome)
-  const { rows } = await readJsonl(paths.ledgerLog)
-  const state = replay(rows)
-  await atomicWrite(paths.ledgerSnapshot, snapshotContent(state))
-  return { days: Object.keys(state.days).length, todos: state.todos.length }
+  return withLedgerLock(paths, async () => {
+    const { rows, badLines } = await readJsonl(paths.ledgerLog)
+    if (badLines > 0) {
+      // 结算故障显式报错(NFR):log 自身损坏不能被静默掩盖;能解析的行仍然重放
+      process.stderr.write(`worklog: warning: ledger-log contains ${badLines} unparsable line(s); rebuilt from the remaining transactions.\n`)
+    }
+    const state = replay(rows)
+    await atomicWrite(paths.ledgerSnapshot, snapshotContent(state))
+    return { days: Object.keys(state.days).length, todos: state.todos.length, badLines }
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -92,15 +183,17 @@ export async function importV1({ wlHome, memoryPath }) {
   }
   const txId = `import:${sha256Hex(canonicalJson(payload))}`
   const imported = { todos: payload.todos.length, ideas: payload.ideas.length }
-  const { rows: log } = await readJsonl(paths.ledgerLog)
-  if (log.some(tx => tx && tx.txId === txId)) return { txId, imported, noop: true }
+  return withLedgerLock(paths, async () => {
+    const { rows: log } = await readJsonl(paths.ledgerLog)
+    if (log.some(tx => tx && tx.txId === txId)) return { txId, imported, noop: true }
 
-  const tx = { txId, type: 'import', appliedAt: isoNow(), ...payload }
-  const state = replay(log)
-  applyTx(state, tx)
-  await appendJsonLine(paths.ledgerLog, tx)
-  await atomicWrite(paths.ledgerSnapshot, snapshotContent(state))
-  return { txId, imported, noop: false }
+    const tx = { txId, type: 'import', appliedAt: isoNow(), ...payload }
+    const state = replay(log)
+    applyTx(state, tx)
+    await appendJsonLine(paths.ledgerLog, tx)
+    await atomicWrite(paths.ledgerSnapshot, snapshotContent(state))
+    return { txId, imported, noop: false }
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -158,7 +251,16 @@ function finalEvent(event, edits) {
 
 function replay(rows) {
   const state = { confirmedThrough: null, todos: [], ideas: [], days: {} }
-  for (const tx of asArray(rows)) applyTx(state, tx)
+  // 按 txId 去重:历史竞态/手工拼接产生的重复事务行不被双重应用,重放对损坏 log 自愈
+  const seenTxIds = new Set()
+  for (const tx of asArray(rows)) {
+    const txId = tx && typeof tx === 'object' ? tx.txId : ''
+    if (txId) {
+      if (seenTxIds.has(txId)) continue
+      seenTxIds.add(txId)
+    }
+    applyTx(state, tx)
+  }
   return state
 }
 
@@ -291,12 +393,10 @@ function snapshotContent(state) {
   return `${JSON.stringify(snapshot, null, 2)}\n`
 }
 
-function* missingDays({ state, date, inboxDates }) {
+function* gapDays({ state, date }) {
   const from = String(state.confirmedThrough || '')
   if (!DATE_PATTERN.test(from)) return
   for (let day = nextDate(from); day < date; day = nextDate(day)) {
-    if (inboxDates.has(day)) continue
-    if (state.days[day]) continue
     yield day
   }
 }

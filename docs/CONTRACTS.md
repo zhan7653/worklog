@@ -192,6 +192,22 @@ runMatch({ candidates, firsthand, openTodos, lang })
 - stdout 输出一行结果 JSON；错误走 stderr + exitCode 1（V1 bin 的包装方式）。
 - `confirm --date D --patch <file|->`：`-` 表示从 stdin 读补丁。
 
+## 实现期落定的补充约定（2026-07-27 对抗审查后）
+
+1. **txId 派生**：`date + ":" + sha256(canonical({confirmation, mode, firsthand 事件 id 列表, candidates 事件 id 列表}))`。
+   只哈希 confirmation 会让空补丁的补充结算与首轮碰撞、补充事件被误判重复而静默丢失（AC-10）。
+2. **补充过滤按事件 id**：supplement 装配以「事件 id 是否已出现在该日事务的 resolvedEvents」过滤，
+   不用时间窗（assemble→commit 之间落盘的事件不会被时间窗永久漏掉）；补充检测直接读 ledger-log，不信任快照。
+3. **结算有序**：commit 拒绝把区间内"有数据且未结算"的更早日子静默吞进 confirmedThrough，显式报错要求先逐日结算或跳过。
+4. **skipDay 零成本**：confirm/commit 对 `skipDay:true` 不要求 day.json 存在；skip 补丁与其他字段互斥。
+5. **冷路径结算锁**：commit/rebuild/import 全程持 `ledger/.lock`（mkdir 原子，30s 陈旧锁清除）；replay 按 txId 去重。
+6. **提醒频率**：`state/notified-<date>` 标记跨 SessionStart 与 UserPromptSubmit 两条挂点共享，每本地日至多注入一次；
+   标记建档一律用 `( set -C; true >file )` 形式（`:` 是 POSIX 特殊内建，dash 下重定向失败会中止脚本且 stderr 先于抑制生效）。
+7. **欠账判定为 inbox-only**：设计规格 FR-10 的"或会话目录非空"分支为有意简化不实现（实现方案 §3.4 即如此），
+   纯考古日由显式触发与下次结算覆盖——这是已落定取舍，不是缺陷。
+8. **脱敏次序**：任何截断（slice/limit）必须发生在 redactText 之后，否则残段逃过模式匹配。
+9. **match 超时**：`WORKLOG_MATCH_TIMEOUT_MS`（默认 120000），超时杀进程并抛错走降级。
+
 ## 测试约定
 
 - 热路径测试：纯 sh 断言脚本，`WL_HOME=$(mktemp -d)` 沙箱，在 WSL 执行。

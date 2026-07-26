@@ -8,9 +8,11 @@ WL_POST_COMMIT_RUNNING=1
 export WL_POST_COMMIT_RUNNING
 
 # core.hooksPath 全局生效会遮蔽仓库本地钩子(husky 等),必须链式回调。
-# 注意:必须用 --git-dir 拼路径。--git-path hooks/post-commit 会解析回 core.hooksPath
+# 注意:必须用 --git-common-dir 拼路径(worktree 下 --git-dir 指向 worktrees/<name>/,
+# 会漏掉主仓库钩子);--git-path hooks/post-commit 则会解析回 core.hooksPath
 # 指向的全局目录,即本脚本自身,造成自调用。
-git_dir="$(git rev-parse --git-dir 2>/dev/null)" || exit 0
+git_dir="$(git rev-parse --git-common-dir 2>/dev/null)" || git_dir=""
+[ -n "$git_dir" ] || git_dir="$(git rev-parse --git-dir 2>/dev/null)" || exit 0
 local_hook="$git_dir/hooks/post-commit"
 if [ -x "$local_hook" ]; then
   "$local_hook" "$@" || true
@@ -25,13 +27,20 @@ parents="$(git rev-list --parents -n1 HEAD 2>/dev/null | wc -w | tr -d ' ')"
 
 sha="$(git rev-parse --short HEAD 2>/dev/null)" || exit 0
 subject="$(git log -1 --format=%s 2>/dev/null)" || exit 0
+# 空 subject(--allow-empty-message)也要捕获:AC-1 只豁免 merge commit
+[ -n "$subject" ] || subject="commit $sha"
 top="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 repo="$(basename "$top")"
 
-# 登记仓库路径,供 gitlog 采集器使用(去重追加)
-if ! grep -qxF "$top" "$WL_HOME/state/repos.list" 2>/dev/null; then
+# 登记仓库路径,供 gitlog 采集器使用(去重追加;有 flock 时串行化防并发重复行)
+repos_list="$WL_HOME/state/repos.list"
+if ! grep -qxF "$top" "$repos_list" 2>/dev/null; then
   mkdir -p "$WL_HOME/state" 2>/dev/null || true
-  printf '%s\n' "$top" >>"$WL_HOME/state/repos.list" 2>/dev/null || true
+  if command -v flock >/dev/null 2>&1; then
+    { flock 8; grep -qxF "$top" "$repos_list" 2>/dev/null || printf '%s\n' "$top" >&8; } 8>>"$repos_list" 2>/dev/null || true
+  else
+    printf '%s\n' "$top" >>"$repos_list" 2>/dev/null || true
+  fi
 fi
 
 wl_bin="$WL_HOME/bin/wl"
