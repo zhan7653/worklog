@@ -24,8 +24,9 @@ bash scripts/install.sh
 2. 软链 `~/.local/bin/wl`(不在 PATH 时给出提示)。
 3. **`git config --global core.hooksPath`**:未设置 → 指向 `~/.worklog/git-hooks`,并打印遮蔽警告——全局 hooksPath 会遮蔽各仓库 `.git/hooks/`,因此 `post-commit` 内建链式回调,`.git/hooks/` 式的本地钩子仍会被执行;已设置为其他值 → **不覆盖**,打印在你既有钩子目录里追加两行调用的说明。**注意**:设置了仓库本地 `core.hooksPath` 的仓库(husky v5+ 标准安装即如此)会覆盖全局配置,worklog 钩子在这类仓库不会运行——需要在其钩子目录的 `post-commit` 末尾手工追加一行 `"$HOME/.worklog/git-hooks/post-commit" "$@" || true`,否则该仓库既无捕获也不入 gitlog 考古兜底。
 4. **`~/.codex/hooks.json`**:不存在 → 写入提醒 hook 片段(SessionStart + UserPromptSubmit,见 `hooks/hooks.codex.json`);已存在 → 先备份,再 jq 深合并(同事件数组追加,不删既有项)。Codex 首次会请求信任非托管 hook;可用 `codex features list` 确认 hooks 开关。
-5. 打印全局 AGENTS.md 需要的那一行(口头触发词指令,见 `agents-md/global-line.md`),由你自行粘贴——安装器不改你的全局指令文件。
-6. 自校验:执行一条 `wl note --project install-check -- "installed"` 并展示 inbox 尾行。
+5. **`~/.codex/skills/power-work-report`**:安装 V2 确认对话技能(V1 的移除由 ohmypowers 安装器的退役清单负责)。
+6. 打印全局 AGENTS.md 需要的那一行(口头触发词指令,见 `agents-md/global-line.md`),由你自行粘贴——安装器不改你的全局指令文件。
+7. 自校验:热路径落一条 `wl note` 并展示 inbox 尾行;冷路径 `wl render --all` 探活。
 
 ## 日常使用
 

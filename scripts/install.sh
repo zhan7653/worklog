@@ -96,8 +96,8 @@ PYEOF
 
 [ -f "$REPO_ROOT/bin/wl" ] || die "找不到 $REPO_ROOT/bin/wl:请在 worklog 仓库克隆内执行 scripts/install.sh"
 
-# ── 1/6 目录与副本(hook 配置只引用 $WL_HOME 下副本,与克隆目录解耦)──
-info "==> 1/6 安装副本到 $WL_HOME"
+# ── 1/7 目录与副本(hook 配置只引用 $WL_HOME 下副本,与克隆目录解耦)──
+info "==> 1/7 安装副本到 $WL_HOME"
 mkdir -p "$WL_HOME"/{ledger,days,state,bin,hooks,git-hooks,scripts}
 
 cp -f "$REPO_ROOT/bin/wl"                "$WL_HOME/bin/wl"
@@ -122,8 +122,8 @@ if [ -d "$WL_HOME/scripts/worklog/bin" ]; then
   chmod +x "$WL_HOME/scripts/worklog/bin"/* 2>/dev/null || true
 fi
 
-# ── 2/6 ~/.local/bin/wl 软链 ──
-info "==> 2/6 命令软链"
+# ── 2/7 ~/.local/bin/wl 软链 ──
+info "==> 2/7 命令软链"
 local_bin="$HOME/.local/bin"
 link="$local_bin/wl"
 mkdir -p "$local_bin"
@@ -149,8 +149,8 @@ case ":$PATH:" in
   *) info "提示:$local_bin 不在 PATH 中,加入后才能直接敲 wl(如在 shell rc 里 export PATH=\"\$HOME/.local/bin:\$PATH\")" ;;
 esac
 
-# ── 3/6 全局 git 钩子 ──
-info "==> 3/6 全局 git 钩子"
+# ── 3/7 全局 git 钩子 ──
+info "==> 3/7 全局 git 钩子"
 if ! command -v git >/dev/null 2>&1; then
   warn "未找到 git,跳过 core.hooksPath 配置(commit 即捕获链路暂不可用)"
 else
@@ -169,8 +169,8 @@ else
   fi
 fi
 
-# ── 4/6 Codex hooks ──
-info "==> 4/6 Codex hooks($CODEX_HOME/hooks.json)"
+# ── 4/7 Codex hooks ──
+info "==> 4/7 Codex hooks($CODEX_HOME/hooks.json)"
 hooks_target="$CODEX_HOME/hooks.json"
 frag_tmp="$(mktemp "${TMPDIR:-/tmp}/wl-hooks-frag.XXXXXX")"
 # 片段中的 $HOME/.worklog 展开为实际 WL_HOME 绝对路径,其余 $HOME 展开为实际 HOME
@@ -203,15 +203,26 @@ fi
 rm -f "$frag_tmp"
 info 'Codex 首次加载将请求信任该非托管 hook;请用 `codex features list` 检查 hooks 功能开关是否已开启'
 
-# ── 5/6 全局 AGENTS.md 一行 ──
-info "==> 5/6 全局 AGENTS.md"
+# ── 5/7 V2 技能(实现方案 §9.3:V2 技能随本仓库安装)──
+info "==> 5/7 安装 power-work-report V2 技能到 $CODEX_HOME/skills"
+skill_target="$CODEX_HOME/skills/power-work-report"
+tmp_skill="$CODEX_HOME/skills/.power-work-report.tmp-$$"
+mkdir -p "$CODEX_HOME/skills"
+rm -rf "$tmp_skill"
+cp -R "$REPO_ROOT/skills/power-work-report" "$tmp_skill"
+rm -rf "$skill_target"
+mv "$tmp_skill" "$skill_target"
+info "已安装 $skill_target(V1 技能如仍在,由 ohmypowers 安装器的退役清单负责移除)"
+
+# ── 6/7 全局 AGENTS.md 一行 ──
+info "==> 6/7 全局 AGENTS.md"
 info "请把下面这一行原样加入你的全局 AGENTS.md(本安装器绝不自动修改你的全局指令文件):"
 printf '\n'
 cat "$REPO_ROOT/agents-md/global-line.md"
 printf '\n'
 
-# ── 6/6 安装自检(热路径 + 冷路径都要探活)──
-info "==> 6/6 安装自检"
+# ── 7/7 安装自检(热路径 + 冷路径都要探活)──
+info "==> 7/7 安装自检"
 WL_HOME="$WL_HOME" "$WL_HOME/bin/wl" note --project install-check -- "installed"
 info "已写入一条自检记录,inbox 尾行:"
 tail -n 1 "$WL_HOME/inbox.jsonl"
