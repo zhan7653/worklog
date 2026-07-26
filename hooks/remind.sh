@@ -19,7 +19,11 @@ fi
 # 行首契约:{"ts":"YYYY-MM-DD…" → 日期恰在第 8-17 字符(FR-2 固定键序;测试锁定该假设)。
 days="$(cut -c8-17 "$INBOX" 2>/dev/null | sort -u \
         | awk -v a="$confirmed" -v b="$today" '$0 > a && $0 < b')" || days=""
-[ -n "$days" ] || exit 0
+if [ -z "$days" ]; then
+  # hook 模式零输出零注入(AC-2);--human 给人一句确认
+  [ "${1:-}" = "--human" ] && printf 'worklog:无未确认欠账\n'
+  exit 0
+fi
 
 n="$(printf '%s\n' "$days" | wc -l | tr -d ' ')"
 first="$(printf '%s\n' "$days" | head -1)"

@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["merges", "completions", "overview"],
+  "properties": {
+    "merges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["candidateId", "duplicateOf"],
+        "properties": {
+          "candidateId": { "type": "string" },
+          "duplicateOf": { "type": "string" }
+        }
+      }
+    },
+    "completions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["candidateId", "todoId", "confidence"],
+        "properties": {
+          "candidateId": { "type": "string" },
+          "todoId": { "type": "string" },
+          "confidence": { "enum": ["high", "low"] }
+        }
+      }
+    },
+    "overview": { "type": "string" }
+  }
+}
